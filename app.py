@@ -117,15 +117,14 @@ def option_bet(ticker,select_period, expiry_date):
 
     return price_return_data
 
-def p90(ticker,select_period, expiry_date):
+def p_select(ticker,p_value, select_period, expiry_date):
     opt_data = option_bet(ticker, select_period, expiry_date)
-    opt = opt_data.loc[['90%']]
+    opt = opt_data.loc[['mean','std', p_value]]
 #     .bid_ask.values[0]
     return opt
 
 
 def plot_histogram(df):
-#     df = hist_price
     fig = px.histogram(df, x="return_perc", marginal='box',
                        opacity=0.8,
                        log_y = False, # represent bars with log scale
