@@ -1,134 +1,167 @@
-from datetime import datetime, timedelta
 import pandas as pd
-import yfinance as yf
 import numpy as np
-import plotly.express as px
-import scipy.stats as stats
-import matplotlib.pyplot as plt
+import yfinance as yf
+import plotly.graph_objects as go
 import json
-
+from datetime import datetime, timedelta, date
 pd.options.mode.chained_assignment = None  # default='warn'
+pd.options.display.float_format = "{:,.2f}".format
 
-
-today = datetime.today().date()
-
-def get_stock_price(ticker):
-    stock = yf.Ticker(ticker)
-    price = stock.info['regularMarketPrice']
-    return price
-  
-def options_chain(symbol):
-    tk = yf.Ticker(symbol)
-    # Expiration dates
-    exps = tk.options
-
-    options = pd.DataFrame()
-    for e in exps:
-        opt = tk.option_chain(e)
-        opt = pd.DataFrame().append(opt.calls).append(opt.puts)
-        opt['expirationDate'] = e
-        options = options.append(opt, ignore_index=True)
-
-    options['expirationDate'] = pd.to_datetime(options['expirationDate'])
-#     + timedelta(days = 1)
-    options['dte'] = (options['expirationDate'] - datetime.today()).dt.days / 365
-    
-    # Boolean column if the option is a CALL
-    options['CALL'] = options['contractSymbol'].str[4:].apply(
-        lambda x: "C" in x)
-    
-    options[['bid', 'ask', 'strike']] = options[['bid', 'ask', 'strike']].apply(pd.to_numeric)
-    options['mark'] = (options['bid'] + options['ask']) / 2 # Calculate the midpoint of the bid-ask
-    
-    # Drop unnecessary and meaningless columns
-    options = options.drop(columns = ['contractSize', 'currency', 'change', 'percentChange', 'lastTradeDate', 'lastPrice'])
-
-    return options
-
-def closest_value(input_list, input_value):
-    difference = lambda input_list : abs(input_list - input_value)
+def nearest_value(input_list, find_value):
+    difference = lambda input_list : abs(input_list - find_value)
     res = min(input_list, key=difference)
     return res
 
-def bid_ask_result(ticker,input_list, expiry_date):
-    opt = options_chain(ticker)
-    layer1 = opt.loc[(opt['inTheMoney'] == False) & (opt['expirationDate'] == expiry_date)]
-    all_strikes = layer1.strike.tolist()
-    all_strikes = [int(x) for x in all_strikes]
+def weekdays_calculator(end_str):
+    today = datetime.today().date()
+    end = datetime.strptime(end_str, '%Y-%m-%d').date()
+    return np.busday_count(today, end)
 
-    result = []
-    chose_strike = []
-    bid_ask_list = []
+def yf_info(ticker):
+    return yf.Ticker(ticker)
 
-    for i in input_list:
-        if i in all_strikes:
-            layer2 = layer1.loc[(layer1['strike']==i)]
-            bid_ask = round(((float(layer2.bid.values) + float(layer2.ask.values))/2),2)
-            chose_strike.append(i)
-            bid_ask_list.append(bid_ask)
-        else:
-            closest = closest_value(all_strikes,i)
-#             print (i, closest)
-            layer2 = layer1.loc[(layer1['strike']==closest)]
-            bid_ask = round(((float(layer2.bid.values) + float(layer2.ask.values))/2),2)
-            chose_strike.append(closest)
-            bid_ask_list.append(bid_ask)
-    result.append(chose_strike)
-    result.append(bid_ask_list)
-    return result
+def current_price(ticker):
+    return yf_info(ticker).info['regularMarketPrice']
 
-def option_bet(ticker,select_period, expiry_date):
+def historical_data(ticker):
     hist_price = yf.download(ticker, 
-                             period='3y',
-                             interval='1d',
-                             auto_adjust=True)[['Close']]
-    yf_info = yf.Ticker(ticker)
+                         period='3y',
+                         interval='1d',
+                         auto_adjust=True)[['Close']]
+    return hist_price
 
-    hist_price['return_perc'] = hist_price.pct_change(periods=select_period,fill_method='ffill')
-    hist_price = hist_price.dropna().round(decimals=4)
-    hist_price['return_perc'] = hist_price['return_perc']*100
-    hist_return = hist_price['return_perc']
+def perc_change(ticker,horizon):
+    data = historical_data(ticker)
+    data['return_perc'] = data.pct_change(periods=horizon,fill_method='ffill').round(decimals=4)
+    return data.dropna()
 
-    def describe_df():
-        data = hist_return
-        current_price = float(yf_info.info['regularMarketPrice'])
-        print ("{0} price : {1}".format(ticker, current_price))
-        describe = data.describe(percentiles = [.001,.01,.05,.1,.15,.25,.5,.75,.85,.90,.95,.99,.999])
-        describe_df = describe.to_frame()
-        numbers = describe_df['return_perc'].tolist()
+def latest_perc_change(ticker,horizon, past_days):
+    historical = perc_change(ticker,horizon)
+    r = historical.return_perc.values.tolist()
+    return r[-past_days:]
 
-        result = []
-        for i in numbers:
-            cal = current_price * (1+float(i)/100)
-            result.append(cal)
+def describe_perc_change(ticker,horizon):
+    cur_price = current_price(ticker)
+    data = perc_change(ticker,horizon)
+    describe = data.describe(percentiles = [.001,.01,.05,.1,.15,.25,.5,.75,.85,.90,.95,.99,.999])
+    
+    describe['Close'] = cur_price
+    describe['price'] = cur_price * (1+describe['return_perc'])
+    describe['return_perc'] = describe['return_perc'] * 100
+    describe['price_int'] = describe['price'].astype(int)
+    return describe
+    
+def option_expiry_dates(ticker):
+    return yf_info(ticker).options  #return expiry dates
 
-        describe_df['price'] = result
-        describe_df['price_int'] = describe_df['price'].astype(int)
-        return describe_df
+def option_chain(ticker, expiry_date, call_or_put=None, in_or_out=None):
+    result = yf_info(ticker).option_chain(expiry_date)
+    if call_or_put is None:
+        call = result.calls
+        put = result.puts
+        result = call.append(put, ignore_index=True)
+    elif call_or_put not in ['call','put']:
+        return 'please input call or put'
+    else:
+        result = result.calls if call_or_put=='call' else result.puts if call_or_put=='put' else result
+        
+    result = result.loc[result['inTheMoney'] == True] if in_or_out == 'in' else result.loc[result['inTheMoney'] == False] if in_or_out == 'out' else result
+    return result
+    
+def perc_change_with_option(ticker, horizon, expiry_date, call_or_put=None, in_or_out=None):
+    perc_change_data = describe_perc_change(ticker,horizon)
+    price_int_l = perc_change_data['price_int'].values.tolist()
+    opt_data = option_chain(ticker, expiry_date, call_or_put, in_or_out)
+    all_strikes = opt_data.strike.tolist()
+    
+    chose_strike = []
+    last_price = []
+    for i in price_int_l:
+        if i in all_strikes:
+            lp = opt_data.loc[opt_data['strike']==i].lastPrice.values
+            chose_strike.append(int(i))
+            last_price.append(lp)
+        else:
+            nearest_strike = nearest_value(all_strikes, i)
+            lp = opt_data.loc[opt_data['strike']==nearest_strike].lastPrice.values
+            chose_strike.append(int(nearest_strike))
+            last_price.append(lp)
+    last_price = [i[0] for i in last_price]
+    
+    perc_change_data['chose_strike'] = chose_strike
+    perc_change_data['last_price'] = last_price
+    
+    perc_change_data.loc['count','return_perc'] = perc_change_data.loc['count','return_perc']/100
+    perc_change_data.loc['count','price'] = 0
+    perc_change_data.loc['count','price_int'] = 0
+    perc_change_data.loc['count','chose_strike'] = 0
+    perc_change_data.loc['count','last_price'] = 0
+    
+    perc_change_data.loc['std','price'] = 0
+    perc_change_data.loc['std','price_int'] = 0
+    perc_change_data.loc['std','chose_strike'] = 0
+    perc_change_data.loc['std','last_price'] = 0
+    
+    perc_change_data.loc['mean','price'] = 0
+    perc_change_data.loc['mean','price_int'] = 0
+    perc_change_data.loc['mean','chose_strike'] = 0
+    perc_change_data.loc['mean','last_price'] = 0
+    
+    return perc_change_data
 
-    price_return_data = describe_df()
-    price_input_list = price_return_data.price_int.tolist()
-    checked_result = bid_ask_result(ticker,price_input_list,expiry_date)
-    chose_strike = checked_result[0]
-    chose_bid_ask = checked_result[1]
+def plot_histogram(ticker, horizon):
+    fig = go.Figure()
+    historical = perc_change(ticker,horizon)
+    all_perc_change_l = historical.return_perc.values.tolist()
+    
+    latest_perc_change_l = all_perc_change_l[-20:]
+    cur_per_change = all_perc_change_l[-1:]
+    print (cur_per_change)
+    fig.add_trace(go.Histogram(x=all_perc_change_l,
+#                                     histnorm = 'probability',
+                                    name = 'all',
+#                                     autobinx=True,
+#                                     xbins = dict(
+#                                                start=-0.4,
+#                                                end=0.4,
+#                                                size=0.05),
+                                    marker_color='#330C73',
+                                    opacity=0.75,
+#                                     texttemplate="%{x}", 
+#                                     textfont_size=10
+                                    ))
+    
+    fig.add_trace(go.Histogram(x=latest_perc_change_l,
+                                    name = 'past 20 trading days',
+#                                     autobinx=True,
+                                    marker_color='#EB89B5',
+                                    opacity=0.9,
+                                    ))
+    
+    fig.add_trace(go.Histogram(x=cur_per_change,
+                                name = 'today',
+#                                 autobinx=True,
+                                marker_color='#FF0000',
+                                opacity=1,
+                                ))
 
-    price_return_data['chose_strike'] = chose_strike
-    price_return_data['bid_ask'] = chose_bid_ask
-
-    return price_return_data
-
-def p_select(ticker,p_value, select_period, expiry_date):
-    opt_data = option_bet(ticker, select_period, expiry_date)
-    opt = opt_data.loc[['mean','std', p_value]]
-#     .bid_ask.values[0]
-    return opt
-
-
-def plot_histogram(df):
-    fig = px.histogram(df, x="return_perc", marginal='box',
-                       opacity=0.8,
-                       log_y = False, # represent bars with log scale
-                       hover_data=df.columns, 
-                       text_auto=False,
-                       nbins=100) # can try violin, rug or box.nbins means how many bars we want it aggregate to
+    fig.update_layout(
+        barmode='overlay',
+        title_text='% Change Distribution Count', # title of plot
+        xaxis_title_text='% Change', # xaxis label
+        yaxis_title_text='Count', # yaxis label
+#         bargap=0.2, # gap between bars of adjacent location coordinates
+#         bargroupgap=0.1 # gap between bars of the same location coordinates
+    )
     fig.show()
+    
+    
+ticker = 'spy'
+expiry_date = '2022-05-20'
+days = weekdays_calculator(expiry_date)
+print (ticker, expiry_date, days)
+
+descp = perc_change_with_option(ticker=ticker, horizon=days, expiry_date=expiry_date, call_or_put=None, in_or_out = 'out')
+print (descp)
+plot_histogram(ticker, days)
+
