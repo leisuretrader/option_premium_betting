@@ -3,9 +3,11 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import json
+import pickle
 from datetime import datetime, timedelta, date
 pd.options.mode.chained_assignment = None  # default='warn'
 pd.options.display.float_format = "{:,.2f}".format
+
 
 def nearest_value(input_list, find_value):
     difference = lambda input_list : abs(input_list - find_value)
@@ -17,6 +19,11 @@ def weekdays_calculator(end_str):
     end = datetime.strptime(end_str, '%Y-%m-%d').date()
     return np.busday_count(today, end)
 
+def split_list(input_list, n):  #this will return generater, add list() to output as list
+    for i in range(0, len(input_list), n): 
+        yield input_list[i:i + n] 
+        
+# output = list(split_list(test_list, 3)) 
 def yf_info(ticker):
     return yf.Ticker(ticker)
 
@@ -154,14 +161,133 @@ def plot_histogram(ticker, horizon):
 #         bargroupgap=0.1 # gap between bars of the same location coordinates
     )
     fig.show()
-    
-    
-ticker = 'spy'
+
+ticker = 'AEE'
 expiry_date = '2022-05-20'
 days = weekdays_calculator(expiry_date)
 print (ticker, expiry_date, days)
+
+def get_basic_info(df):  # return list [current_price, mean, std,ninety_price, ninety_last,ninety_perc_change,dollar_return
+    result = []
+    current_price = round(df.loc['count','Close'].astype(float),2)
+    mean = round(df.loc['mean','return_perc'].astype(float),2)
+    std = round(df.loc['std','return_perc'].astype(float),2)
+    
+    ninety_price = round(df.loc['90%','chose_strike'].astype(float),2)
+    ninety_last = round(df.loc['90%','last_price'].astype(float),2)
+    ninety_perc_change = round((ninety_price / current_price -1), 4)
+    
+    dollar_return = round((ninety_last / current_price),4)
+    
+    result.extend([current_price, mean, std, ninety_price, ninety_last, ninety_perc_change, dollar_return])
+    return result
+    
+def spy_benchmark():
+    r = perc_change_with_option(ticker="spy", horizon=days, expiry_date=expiry_date, call_or_put=None, in_or_out = 'out')
+    return get_basic_info(r)
+
+# spy = spy_benchmark()  
+# spy
 
 descp = perc_change_with_option(ticker=ticker, horizon=days, expiry_date=expiry_date, call_or_put=None, in_or_out = 'out')
 print (descp)
 plot_histogram(ticker, days)
 
+option_chain(ticker, expiry_date, call_or_put=None, in_or_out='out')
+def dump_json(csv_filename):  #need to adjust to get all at once
+    """ result look like:
+    [{'AAPL': 167.9606},
+     {'MSFT': 283.92},
+     {'AMZN': 3067.065},
+     {'TSLA': 989.62}]
+    """
+    ticker_list = pd.read_csv('{}.csv'.format(csv_filename),header=None)[0].tolist()[1:]
+    result_list = []
+    for i in ticker_list:
+        print ('get data for {}'.format(i))
+        stock_data_dict = {}
+        stock_data_dict[i] = get_stock_price(i)
+        result_list.append(stock_data_dict)
+    y = json.dumps(stock_list)
+    with open('{}_json.json'.fomrat(csv_filename), 'w') as outfile:
+        outfile.write(y)           
+# dump_json("spy")
+
+def select_stock(json_filename):
+    f = open('{}.json'.format(json_filename))
+    data = json.load(f)
+    stock_list = [list(i.keys())[0] for i in data]
+    
+    # Logic One : Check stocks price less than 100
+    unqualified_l = [] 
+    for i in data:
+        ticker = list(i.keys())[0]
+        try:
+            cur_price = list(i.values())[0]
+            if cur_price > 100:
+                unqualified_l.append(ticker)
+        except: # no price found, automatically unqualify
+            unqualified_l.append(ticker)
+    qualified_l = [x for x in stock_list if x not in unqualified_l]
+    
+    result = []
+    #current_price, mean, std,ninety_price, ninety_percentile,ninety_perc_change,dollar_return
+#     count = len(qualified_l)
+
+############################################################################
+#     breakdown_list = list(split_list(qualified_l,5))  #breakdown to list of lists, 5 element in each
+#     print (breakdown_list)
+    
+#     for i in breakdown_list:
+    
+####################################################################
+    
+    for i in qualified_l:  #breakdownlist and do multithread
+#         count = count - 1
+#         print (i, 'countdown: ' + str(count))
+        basic_info = {}
+        try:
+            df = perc_change_with_option(ticker=i, horizon=days, expiry_date=expiry_date, call_or_put=None, in_or_out = 'out')
+            ticker_info = get_basic_info(df)
+            basic_info['ticker'] = i
+            basic_info['price'] = ticker_info[0]
+            basic_info['mean'] = ticker_info[1]
+            basic_info['std'] = ticker_info[2]
+            basic_info['90_strike_price'] = ticker_info[3]
+            basic_info['90_last'] = ticker_info[4]
+            basic_info['90_perc_change'] = ticker_info[5]
+            basic_info['90_dollar_return'] = ticker_info[6]
+            print (basic_info)
+            result.append(basic_info)
+        except:
+            print (i, 'errorhappened')
+
+    try:  # try store in json file first, if file, then store to pickle
+        y = json.dumps(result)
+        with open('ticker_info.json', 'w') as outfile:
+            outfile.write(y)
+        print ('all stored in json')
+    except:
+        file_name = "ticker_info.pkl"
+        open_file = open(file_name, "wb")
+        pickle.dump(result, open_file)
+        open_file.close()
+        print ('all stored in pickle')
+        
+select_stock("spy_json")
+
+def further_filter():
+    f = open('ticker_info.json')
+    data = json.load(f)
+    print (len(data))
+    
+    qualified_l = []
+    for i in data:
+        if i.get('mean') > 0:  #ticker has mean >0
+            if i.get('std') < spy[2]:  #ticker has std less than spy
+                qualified_l.append(i)
+    
+    return qualified_l
+
+further_filter()
+    
